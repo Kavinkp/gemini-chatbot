@@ -1,4 +1,5 @@
 import os
+import platform
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as gen_ai
@@ -6,8 +7,12 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import fitz  # PyMuPDF
-import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
+# Try importing chromadb if not on Streamlit Cloud
+is_streamlit_cloud = platform.system() == "Linux"
+if not is_streamlit_cloud:
+    import chromadb
+    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 # Load environment variables
 load_dotenv()
@@ -24,7 +29,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 gen_ai.configure(api_key=GOOGLE_API_KEY)
 model = gen_ai.GenerativeModel('models/gemini-1.5-flash-latest')
 
-# Role formatting helper
+# Helper
 def translate_role_for_streamlit(user_role):
     return "assistant" if user_role == "model" else user_role
 
@@ -35,7 +40,6 @@ if "recommender_session" not in st.session_state:
 if "chatbot_session" not in st.session_state:
     st.session_state.chatbot_session = model.start_chat(history=[])
 
-# Initialize RAG session states
 if "rag_chunks" not in st.session_state:
     st.session_state.rag_chunks = []
     st.session_state.rag_sources = []
@@ -50,7 +54,7 @@ active_tab = st.radio(
     horizontal=True
 )
 
-# Tab 1: Material Recommender
+# ---------------------- Tab 1 ----------------------
 if active_tab == "🔍 Material Recommender":
     st.title("🔍 Aerospace Material Recommender")
 
@@ -74,7 +78,7 @@ if active_tab == "🔍 Material Recommender":
         with st.chat_message(translate_role_for_streamlit(msg.role)):
             st.markdown(msg.parts[0].text)
 
-# Tab 2: Chatbot
+# ---------------------- Tab 2 ----------------------
 elif active_tab == "🤖 Chatbot":
     st.title("🤖 Chat with AeroMate")
 
@@ -89,7 +93,7 @@ elif active_tab == "🤖 Chatbot":
         with st.chat_message("assistant"):
             st.markdown(response.text)
 
-# Tab 3: Research Paper Scraper
+# ---------------------- Tab 3 ----------------------
 elif active_tab == "📄 Research Paper Scraper":
     st.title("📄 Research Paper Scraper & Summarizer (ScienceDirect)")
 
@@ -147,7 +151,7 @@ elif active_tab == "📄 Research Paper Scraper":
         except Exception as e:
             st.error(f"Error accessing page: {e}")
 
-# Tab 4: Upload & Summarize PDF
+# ---------------------- Tab 4 ----------------------
 elif active_tab == "📄 Upload & Summarize PDF":
     st.title("📄 Upload Research Paper PDF & Summarize")
     uploaded_file = st.file_uploader("Upload a research paper (PDF)", type=["pdf"])
@@ -164,52 +168,55 @@ elif active_tab == "📄 Upload & Summarize PDF":
             st.subheader("🧠 Gemini Summary")
             st.markdown(response.text)
 
-# Tab 5: Chat with My Papers (RAG)
+# ---------------------- Tab 5 ----------------------
 elif active_tab == "💬 Chat with My Papers":
     st.title("💬 Chat with My Papers (RAG with ChromaDB)")
 
-    uploaded_pdfs = st.file_uploader("Upload multiple PDFs", type=["pdf"], accept_multiple_files=True)
+    if is_streamlit_cloud:
+        st.warning("⚠️ This feature is disabled on Streamlit Cloud. Please run this app locally to use ChromaDB-based RAG.")
+    else:
+        uploaded_pdfs = st.file_uploader("Upload multiple PDFs", type=["pdf"], accept_multiple_files=True)
 
-    if uploaded_pdfs:
-        with st.spinner("Reading and chunking PDFs..."):
-            for file in uploaded_pdfs:
-                if file.name not in st.session_state.uploaded_pdfs_memory:
-                    doc = fitz.open(stream=file.read(), filetype="pdf")
-                    raw_text = "".join(page.get_text() for page in doc)
-                    chunks = [raw_text[i:i+1000] for i in range(0, len(raw_text), 1000)]
-                    st.session_state.uploaded_pdfs_memory[file.name] = chunks
+        if uploaded_pdfs:
+            with st.spinner("Reading and chunking PDFs..."):
+                for file in uploaded_pdfs:
+                    if file.name not in st.session_state.uploaded_pdfs_memory:
+                        doc = fitz.open(stream=file.read(), filetype="pdf")
+                        raw_text = "".join(page.get_text() for page in doc)
+                        chunks = [raw_text[i:i+1000] for i in range(0, len(raw_text), 1000)]
+                        st.session_state.uploaded_pdfs_memory[file.name] = chunks
 
-            st.session_state.rag_chunks = []
-            st.session_state.rag_sources = []
-            for fname, chunks in st.session_state.uploaded_pdfs_memory.items():
-                st.session_state.rag_chunks.extend(chunks)
-                st.session_state.rag_sources.extend([fname] * len(chunks))
+                st.session_state.rag_chunks = []
+                st.session_state.rag_sources = []
+                for fname, chunks in st.session_state.uploaded_pdfs_memory.items():
+                    st.session_state.rag_chunks.extend(chunks)
+                    st.session_state.rag_sources.extend([fname] * len(chunks))
 
-    if st.session_state.rag_chunks and not st.session_state.rag_db_built:
-        with st.spinner("Embedding and storing in ChromaDB..."):
-            chroma_client = chromadb.Client()
-            embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-            collection = chroma_client.get_or_create_collection(name="my-papers", embedding_function=embed_fn)
+        if st.session_state.rag_chunks and not st.session_state.rag_db_built:
+            with st.spinner("Embedding and storing in ChromaDB..."):
+                chroma_client = chromadb.Client()
+                embed_fn = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+                collection = chroma_client.get_or_create_collection(name="my-papers", embedding_function=embed_fn)
 
-            for i, chunk in enumerate(st.session_state.rag_chunks):
-                collection.add(
-                    documents=[chunk],
-                    ids=[f"chunk-{i}"],
-                    metadatas=[{"source": st.session_state.rag_sources[i]}]
-                )
+                for i, chunk in enumerate(st.session_state.rag_chunks):
+                    collection.add(
+                        documents=[chunk],
+                        ids=[f"chunk-{i}"],
+                        metadatas=[{"source": st.session_state.rag_sources[i]}]
+                    )
 
-            st.session_state.rag_collection = collection
-            st.session_state.rag_db_built = True
+                st.session_state.rag_collection = collection
+                st.session_state.rag_db_built = True
 
-        st.success(f"✅ Stored {len(st.session_state.rag_chunks)} chunks from {len(st.session_state.uploaded_pdfs_memory)} files.")
+            st.success(f"✅ Stored {len(st.session_state.rag_chunks)} chunks from {len(st.session_state.uploaded_pdfs_memory)} files.")
 
-    if st.session_state.rag_collection:
-        user_question = st.text_input("Ask a question about your uploaded papers:")
-        if user_question:
-            results = st.session_state.rag_collection.query(query_texts=[user_question], n_results=5)
-            if results['documents']:
-                retrieved_text = "\n\n".join(results['documents'][0])
-                prompt = f"""Use the following context from uploaded PDFs to answer the user's question.
+        if st.session_state.rag_collection:
+            user_question = st.text_input("Ask a question about your uploaded papers:")
+            if user_question:
+                results = st.session_state.rag_collection.query(query_texts=[user_question], n_results=5)
+                if results['documents']:
+                    retrieved_text = "\n\n".join(results['documents'][0])
+                    prompt = f"""Use the following context from uploaded PDFs to answer the user's question.
 
 Context:
 {retrieved_text}
@@ -218,7 +225,7 @@ Question:
 {user_question}
 
 Answer concisely, citing content when possible."""
-                with st.spinner("Thinking with Gemini..."):
-                    response = model.generate_content(prompt)
-                    st.subheader("🧠 Gemini's Answer")
-                    st.markdown(response.text)
+                    with st.spinner("Thinking with Gemini..."):
+                        response = model.generate_content(prompt)
+                        st.subheader("🧠 Gemini's Answer")
+                        st.markdown(response.text)
